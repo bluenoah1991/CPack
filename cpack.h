@@ -8,7 +8,6 @@
 #include <stdio.h>
 
 #include "sqlite3.h"
-#include "mongoose.h"
 
 #include "heap.h"
 
@@ -36,8 +35,6 @@ typedef struct cp_buf{
 } cp_buf;
 
 typedef struct cp_client{
-    char *server_url;
-    void(*callback)(const cp_buf *buf);
     sqlite3 *db;
     uint16_t nid;
     heap *packets;
@@ -86,11 +83,6 @@ void write_short(char **pptr, uint16_t i);
 
 void write_data(char **pptr, const void *data, uint32_t length);
 
-// HTTP
-
-void cp_http_post(cp_client *client, const cp_buf *post_data, 
-    int (*response_handler)(cp_client *client, const cp_buf *body));
-
 // PROTOCOL
 
 void *cp_encode_packet(
@@ -103,14 +95,16 @@ void cp_packet_free(cp_packet *packet);
 
 // INTERFACE
 
-int cp_client_init(
-    cp_client **client, char *server_url, 
-    const char *dbpath, void(*callback)(const cp_buf *buf));
+void cp_sleep(int ms);
+
+int cp_client_init(cp_client **client, const char *dbpath);
 
 void cp_client_free(cp_client *client);
 
-int cp_commit_packet(cp_client *client, const cp_buf *payload, uint8_t qos);
+int cp_generate_body(cp_client *client, cp_buf **body);
 
-void cp_start_loop(cp_client *client);
+int cp_parse_body(cp_client *client, const cp_buf *body, void(*callback)(const cp_buf *payload));
+
+int cp_commit_packet(cp_client *client, const cp_buf *payload, uint8_t qos);
 
 #endif

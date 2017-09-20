@@ -27,17 +27,7 @@ void cp_sleep(int ms){
 // Array
 typedef void ** cp_array;
 
-// STRUCT
-
-typedef struct _cp_http_opt{
-    cp_client *client;
-    int exit_flag;
-    int (*response_handler)(cp_client *client, const cp_buf *buf);
-} _cp_http_opt;
-
 // Fuction Define
-
-static void _cp_http_ev_handler(struct mg_connection *c, int ev, void *p);
 
 int _cp_packet_compare(node nd1, node nd2);
 
@@ -71,7 +61,7 @@ int _cp_combine_packets(cp_buf **buf, const cp_array packets, uint32_t num);
 
 int _cp_split_packets(const cp_buf *buf, cp_array *packets, size_t *num);
 
-int _cp_response_handler(cp_client *client, const cp_buf *body);
+int _cp_handle_packet(cp_client *client, const cp_packet *packet, void(*callback)(const cp_buf *payload));
 
 // CP_BUF
 
@@ -234,49 +224,6 @@ void cp_packet_free(cp_packet *packet){
     cp_buf_free(packet->payload);
     cp_buf_free(packet->buffer);
     free(packet);
-}
-
-// HTTP
-
-static void _cp_http_ev_handler(struct mg_connection *c, int ev, void *p){
-    _cp_http_opt *opt = c->user_data;
-    if(ev == MG_EV_HTTP_REPLY){
-        c->flags |= MG_F_CLOSE_IMMEDIATELY;
-
-        // Invoke response handle function
-        struct http_message *hm = (struct http_message *)p;
-        if(hm->body.len){
-            cp_buf *buf = cp_buf_init();
-            cp_buf_append(buf, hm->body.p, hm->body.len);
-            opt->response_handler(opt->client, buf);
-            cp_buf_free(buf);
-        }
-        opt->exit_flag = 1;
-    } else if(ev == MG_EV_CLOSE){
-        opt->exit_flag = 1;
-    }
-}
-
-void cp_http_post(cp_client *client, const cp_buf *post_data, 
-    int (*response_handler)(cp_client *client, const cp_buf *buf)){
-    struct mg_mgr mgr;
-
-    struct mg_connect_opts connect_opts;
-    memset(&connect_opts, 0, sizeof(connect_opts));
-    _cp_http_opt opt;
-    opt.client = client;
-    opt.exit_flag = 0;
-    opt.response_handler = response_handler;
-    connect_opts.user_data = &opt;
-
-    mg_mgr_init(&mgr, NULL);
-    mg_connect_http_opt2(&mgr, _cp_http_ev_handler, connect_opts, 
-        client->server_url, NULL, post_data->data, post_data->size);
-
-    while(opt.exit_flag == 0){
-        mg_mgr_poll(&mgr, 500);
-    }
-    mg_mgr_free(&mgr);
 }
 
 // INTERFACE
@@ -643,87 +590,71 @@ int _cp_split_packets(const cp_buf *buf, cp_array *packets, size_t *num){
     return CP_OK;
 }
 
-int _cp_response_handler(cp_client *client, const cp_buf *body){
-    cp_array packets;
-    size_t num;
-    int rc = _cp_split_packets(body, &packets, &num);
-    if(rc){
-       return CP_ERROR; 
-    }
-    for(int i = 0; i < num; i++){
-        cp_packet *packet = packets[i];
-        if(packet->type == CP_PROTOCOL_MSG_TYPE_SEND){
-            if(packet->qos == CP_PROTOCOL_QOS0){
-                client->callback(packet->payload);
-            } else if(packet->qos == CP_PROTOCOL_QOS1){
-                cp_packet *reply_packet = cp_encode_packet(
-                    CP_PROTOCOL_MSG_TYPE_ACK, CP_PROTOCOL_QOS0, 0, packet->id, NULL);
-                rc = _cp_push_packet(client, reply_packet);
-                if(rc){
-                    break;
-                }
-                client->callback(packet->payload);
-            } else if(packet->qos == CP_PROTOCOL_QOS2){
-                rc = _cp_receive_message(client, packet->id, packet->payload);
-                if(rc){
-                    break;
-                }
-                cp_packet *reply_packet = cp_encode_packet(
-                    CP_PROTOCOL_MSG_TYPE_RECEIVED, CP_PROTOCOL_QOS0, 0, packet->id, NULL);
-                rc = _cp_push_packet(client, reply_packet);
-                if(rc){
-                    break;
-                }
-            }
-        } else if(packet->type == CP_PROTOCOL_MSG_TYPE_ACK){
-            rc = _cp_confirm_packet(client, packet->id);
-            if(rc){
-                break;
-            }
-        } else if(packet->type == CP_PROTOCOL_MSG_TYPE_RECEIVED){
-            rc = _cp_confirm_packet(client, packet->id);
-            if(rc){
-                break;
-            }
+int _cp_handle_packet(cp_client *client, const cp_packet *packet, void(*callback)(const cp_buf *payload)){
+    int rc;
+    if(packet->type == CP_PROTOCOL_MSG_TYPE_SEND){
+        if(packet->qos == CP_PROTOCOL_QOS0){
+            callback(packet->payload);
+        } else if(packet->qos == CP_PROTOCOL_QOS1){
             cp_packet *reply_packet = cp_encode_packet(
-                CP_PROTOCOL_MSG_TYPE_RELEASE, CP_PROTOCOL_QOS1, 0, packet->id, NULL);
+                CP_PROTOCOL_MSG_TYPE_ACK, CP_PROTOCOL_QOS0, 0, packet->id, NULL);
             rc = _cp_push_packet(client, reply_packet);
             if(rc){
-                break;
+                return CP_ERROR;
             }
-        } else if(packet->type == CP_PROTOCOL_MSG_TYPE_RELEASE){
-            cp_buf *payload;
-            rc = _cp_release_message(client, packet->id, &payload);
+            callback(packet->payload);
+        } else if(packet->qos == CP_PROTOCOL_QOS2){
+            rc = _cp_receive_message(client, packet->id, packet->payload);
             if(rc){
-                break;
+                return CP_ERROR;
             }
-            client->callback(payload);
-            cp_buf_free(payload);
             cp_packet *reply_packet = cp_encode_packet(
-                CP_PROTOCOL_MSG_TYPE_COMPLETED, CP_PROTOCOL_QOS0, 0, packet->id, NULL);
+                CP_PROTOCOL_MSG_TYPE_RECEIVED, CP_PROTOCOL_QOS0, 0, packet->id, NULL);
             rc = _cp_push_packet(client, reply_packet);
             if(rc){
-                break;
-            }
-        } else if(packet->type == CP_PROTOCOL_MSG_TYPE_COMPLETED){
-            rc = _cp_confirm_packet(client, packet->id);
-            if(rc){
-                break;
+                return CP_ERROR;
             }
         }
+    } else if(packet->type == CP_PROTOCOL_MSG_TYPE_ACK){
+        rc = _cp_confirm_packet(client, packet->id);
+        if(rc){
+            return CP_ERROR;
+        }
+    } else if(packet->type == CP_PROTOCOL_MSG_TYPE_RECEIVED){
+        rc = _cp_confirm_packet(client, packet->id);
+        if(rc){
+            return CP_ERROR;
+        }
+        cp_packet *reply_packet = cp_encode_packet(
+            CP_PROTOCOL_MSG_TYPE_RELEASE, CP_PROTOCOL_QOS1, 0, packet->id, NULL);
+        rc = _cp_push_packet(client, reply_packet);
+        if(rc){
+            return CP_ERROR;
+        }
+    } else if(packet->type == CP_PROTOCOL_MSG_TYPE_RELEASE){
+        cp_buf *payload;
+        rc = _cp_release_message(client, packet->id, &payload);
+        if(rc){
+            return CP_ERROR;
+        }
+        callback(payload);
+        cp_buf_free(payload);
+        cp_packet *reply_packet = cp_encode_packet(
+            CP_PROTOCOL_MSG_TYPE_COMPLETED, CP_PROTOCOL_QOS0, 0, packet->id, NULL);
+        rc = _cp_push_packet(client, reply_packet);
+        if(rc){
+            return CP_ERROR;
+        }
+    } else if(packet->type == CP_PROTOCOL_MSG_TYPE_COMPLETED){
+        rc = _cp_confirm_packet(client, packet->id);
+        if(rc){
+            return CP_ERROR;
+        }
     }
-
-    // release packets
-    for(int i = 0; i < num; i++){
-        cp_packet_free(packets[i]);
-    }
-    free(packets);
     return CP_OK;
 }
 
-int cp_client_init(
-    cp_client **client, char *server_url, 
-    const char *dbpath, void(*callback)(const cp_buf *buf)){
+int cp_client_init(cp_client **client, const char *dbpath){
     int rc;
     char *err;
     sqlite3 *db;
@@ -759,10 +690,6 @@ int cp_client_init(
         sqlite3_free(err);
         return CP_ERROR;
     }
-
-    *client = malloc(sizeof(**client));
-    (*client)->server_url = server_url;
-    (*client)->callback = callback;
 
     // Fill data into min heap
     heap *packets = heap_init(_cp_packet_compare);
@@ -813,10 +740,11 @@ int cp_client_init(
     }
     if(rc != SQLITE_DONE){
         heap_free(packets, _cp_packet_free);
-        free(client);
         return CP_ERROR;
         sqlite3_finalize(stmt);
     }
+
+    *client = malloc(sizeof(**client));
     sqlite3_finalize(stmt);
     (*client)->packets = packets;
 
@@ -824,6 +752,7 @@ int cp_client_init(
     sql = "SELECT IDENTIFIER FROM CP_IDENTIFIER WHERE SCOPE = \"client\" LIMIT 1;";
     rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
     if(rc != SQLITE_OK){
+        free(*client);
         sqlite3_finalize(stmt);
         return CP_ERROR;
     }
@@ -835,7 +764,7 @@ int cp_client_init(
         (*client)->nid = 0;
     } else {
         heap_free(packets, _cp_packet_free);
-        free(client);
+        free(*client);
         sqlite3_finalize(stmt);
         return CP_ERROR;
     }
@@ -851,37 +780,52 @@ void cp_client_free(cp_client *client){
     free(client);
 }
 
-void cp_start_loop(cp_client *client){
-    while(true){
-        cp_sleep(500);
+int cp_generate_body(cp_client *client, cp_buf **body){
+    size_t num;
+    cp_array packets;
 
-        size_t num;
-        cp_array packets;
-        int rc = _cp_unconfirmed_packet(client, &packets, &num, 5);
-        if(rc){
-            break;
-        }
-
-        // compress messages
-        cp_buf *body;
-        rc = _cp_combine_packets(&body, (const cp_array)packets, num);
-
-        // release packets
-        if(num){
-            for(int i = 0; i < num; i++){
-                cp_packet_free(packets[i]);
-            }
-            free(packets);
-        }
-        if(rc){
-            break;
-        }
-        if(body->size){
-            // Send body to server
-            cp_http_post(client, body, _cp_response_handler);
-        }
-        cp_buf_free(body);
+    int rc = _cp_unconfirmed_packet(client, &packets, &num, 5);
+    if(rc){
+        return CP_ERROR;
     }
+
+    // combine packets
+    rc = _cp_combine_packets(body, (const cp_array)packets, num);
+
+    // release packets
+    if(num){
+        for(int i = 0; i < num; i++){
+            cp_packet_free(packets[i]);
+        }
+        free(packets);
+    }
+    if(rc){
+        return CP_ERROR;
+    }
+    return CP_OK;
+}
+
+int cp_parse_body(cp_client *client, const cp_buf *body, void(*callback)(const cp_buf *payload)){
+    cp_array packets;
+    size_t num;
+    int rc = _cp_split_packets(body, &packets, &num);
+    if(rc){
+        return CP_ERROR;
+    }
+    for(int i = 0; i < num; i++){
+        cp_packet *packet = packets[i];
+        rc = _cp_handle_packet(client, packet, callback);
+        if(rc){
+            return CP_ERROR;
+        }
+    }
+
+    // release packets
+    for(int i = 0; i < num; i++){
+        cp_packet_free(packets[i]);
+    }
+    free(packets);
+    return CP_OK;
 }
 
 int cp_commit_packet(cp_client *client, const cp_buf *payload, uint8_t qos){
