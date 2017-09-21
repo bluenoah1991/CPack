@@ -24,9 +24,6 @@ void cp_sleep(int ms){
 #endif
 }
 
-// Array
-typedef void ** cp_array;
-
 // Fuction Define
 
 int _cp_packet_compare(node nd1, node nd2);
@@ -53,15 +50,16 @@ int _cp_delete_message(cp_client *client, uint16_t id);
 
 int _cp_release_message(cp_client *client, uint16_t id, cp_buf **payload);
 
-int _cp_unconfirmed_packet(cp_client *client, cp_array *packets, size_t *num, size_t limit);
+int _cp_unconfirmed_packet(cp_client *client, cp_array **packets, size_t limit);
 
 int _cp_confirm_packet(cp_client *client, uint16_t id);
 
-int _cp_combine_packets(cp_buf **buf, const cp_array packets, uint32_t num);
+int _cp_combine_packets(const cp_array *packets, cp_buf **buf);
 
-int _cp_split_packets(const cp_buf *buf, cp_array *packets, size_t *num);
+int _cp_split_packets(const cp_buf *buf, cp_array **packets);
 
-int _cp_handle_packet(cp_client *client, const cp_packet *packet, void(*callback)(const cp_buf *payload));
+int _cp_handle_packet(cp_client *client, const cp_packet *packet, 
+    void(*callback)(const cp_buf *payload, void *p), void *p);
 
 // CP_BUF
 
@@ -107,6 +105,32 @@ void cp_buf_to_ch(const cp_buf *buf, char **ch){
     *ch = malloc(buf->size + 1);
     memcpy(*ch, buf->data, buf->size);
     (*ch)[buf->size] = '\0';
+}
+
+// CP_ARRAY
+
+void *cp_array_init(){
+    cp_array *arr;
+    arr = (cp_array *)malloc(sizeof(*arr));
+    arr->p = NULL;
+    arr->size = 0;
+    return arr;
+}
+
+void cp_array_push(cp_array *arr, void *p){
+    if(arr->size){
+        arr->p = realloc(arr->p, sizeof(*(arr->p)) * ++(arr->size));
+    } else {
+        arr->p = malloc(sizeof(*(arr->p)) * ++(arr->size));
+    }
+    arr->p[arr->size - 1] = p;
+}
+
+void cp_array_free(cp_array *arr, void(*release)(void *p)){
+    for(int i = 0; i < arr->size; i++){
+        release(arr->p[i]);
+    }
+    free(arr);
 }
 
 // PACK AND UNPACK (BIG ENDIAN)
@@ -220,7 +244,8 @@ void *cp_decode_packet(const cp_buf *buffer, size_t offset){
     return packet;
 }
 
-void cp_packet_free(cp_packet *packet){
+void cp_packet_free(void *p){
+    cp_packet *packet = p;
     cp_buf_free(packet->payload);
     cp_buf_free(packet->buffer);
     free(packet);
@@ -502,60 +527,47 @@ int _cp_release_message(cp_client *client, uint16_t id, cp_buf **payload){
 }
 
 int _cp_unconfirmed_packet(
-    cp_client *client, cp_array *packets, size_t *num, size_t limit){
+    cp_client *client, cp_array **packets, size_t limit){
     int rc;
-    *packets = malloc(sizeof(**packets) * limit);
-    cp_array r_packets;
+    *packets = cp_array_init();
+    cp_array *r_packets = cp_array_init();
     size_t i = 0;
-    size_t j = 0;
     while(i < limit){
         if(!client->packets->size){
             break;
         }
         cp_packet *packet = client->packets->elem[0];
         heap_delete_node(client->packets, 0);
-        (*packets)[i++] = packet;
+        cp_array_push(*packets, packet);
 
         // Retry packet
         if(packet->qos == CP_PROTOCOL_QOS0){
             rc = _cp_remove_packet(client, packet->id);
             if(rc){
-                free(*packets);
+                cp_array_free(*packets, cp_packet_free);
                 return CP_ERROR;
             }
         } else {
             cp_packet *r_packet;
             rc = _cp_next_packet(&r_packet, packet);
             if(rc){
-                free(*packets);
+                cp_array_free(*packets, cp_packet_free);
                 return CP_ERROR;
             }
             rc = _cp_update_packet(client, packet);
             if(rc){
-                free(*packets);
+                cp_array_free(*packets, cp_packet_free);
                 return CP_ERROR;
             }
-            if(j){
-                r_packets = realloc(r_packets, sizeof(*r_packets) * ++j);
-            } else {
-                r_packets = malloc(sizeof(*r_packets) * ++j);
-            }
-            r_packets[j - 1] = r_packet;
+            cp_array_push(r_packets, r_packet);
         }
     }
 
     // Fill retry packets back to heap
-    if(j){
-        heap_build_heap(client->packets, r_packets, j);
+    if(r_packets->size){
+        heap_build_heap(client->packets, r_packets->p, r_packets->size);
         free(r_packets);
     }
-
-    if(i){
-        *packets = realloc(*packets, sizeof(**packets) * i);
-    } else {
-        free(*packets);
-    }
-    *num = i;
     return CP_OK;
 }
 
@@ -563,38 +575,33 @@ int _cp_confirm_packet(cp_client *client, uint16_t id){
     return _cp_pop_packet(client, id);
 }
 
-int _cp_combine_packets(cp_buf **buf, const cp_array packets, uint32_t num){
+int _cp_combine_packets(const cp_array *packets, cp_buf **buf){
     *buf = cp_buf_init();
     int offset = 0;
-    for(int i = 0; i < num; i++){
-        const cp_packet *packet = packets[i];
+    for(int i = 0; i < packets->size; i++){
+        const cp_packet *packet = packets->p[i];
         cp_buf_append(*buf, packet->buffer->data, packet->buffer->size);
     }
     return CP_OK;
 }
 
-int _cp_split_packets(const cp_buf *buf, cp_array *packets, size_t *num){
-    size_t i = 0;
+int _cp_split_packets(const cp_buf *buf, cp_array **packets){
+    *packets = cp_array_init();
     size_t offset = 0;
     while(offset < buf->size){
         cp_packet *packet = cp_decode_packet(buf, offset);
-        if(i){
-            *packets = realloc(*packets, sizeof(**packets) * ++i);
-        } else {
-            *packets = malloc(sizeof(**packets) * ++i);
-        }
-        (*packets)[i - 1] = packet;
+        cp_array_push(*packets, packet);
         offset += packet->total_length;
     }
-    *num = i;
     return CP_OK;
 }
 
-int _cp_handle_packet(cp_client *client, const cp_packet *packet, void(*callback)(const cp_buf *payload)){
+int _cp_handle_packet(cp_client *client, const cp_packet *packet, 
+    void(*callback)(const cp_buf *payload, void *p), void *p){
     int rc;
     if(packet->type == CP_PROTOCOL_MSG_TYPE_SEND){
         if(packet->qos == CP_PROTOCOL_QOS0){
-            callback(packet->payload);
+            callback(packet->payload, p);
         } else if(packet->qos == CP_PROTOCOL_QOS1){
             cp_packet *reply_packet = cp_encode_packet(
                 CP_PROTOCOL_MSG_TYPE_ACK, CP_PROTOCOL_QOS0, 0, packet->id, NULL);
@@ -602,7 +609,7 @@ int _cp_handle_packet(cp_client *client, const cp_packet *packet, void(*callback
             if(rc){
                 return CP_ERROR;
             }
-            callback(packet->payload);
+            callback(packet->payload, p);
         } else if(packet->qos == CP_PROTOCOL_QOS2){
             rc = _cp_receive_message(client, packet->id, packet->payload);
             if(rc){
@@ -637,7 +644,7 @@ int _cp_handle_packet(cp_client *client, const cp_packet *packet, void(*callback
         if(rc){
             return CP_ERROR;
         }
-        callback(payload);
+        callback(payload, p);
         cp_buf_free(payload);
         cp_packet *reply_packet = cp_encode_packet(
             CP_PROTOCOL_MSG_TYPE_COMPLETED, CP_PROTOCOL_QOS0, 0, packet->id, NULL);
@@ -781,50 +788,38 @@ void cp_client_free(cp_client *client){
 }
 
 int cp_generate_body(cp_client *client, cp_buf **body){
-    size_t num;
-    cp_array packets;
-
-    int rc = _cp_unconfirmed_packet(client, &packets, &num, 5);
+    cp_array *packets;
+    int rc = _cp_unconfirmed_packet(client, &packets, 5);
     if(rc){
         return CP_ERROR;
     }
 
     // combine packets
-    rc = _cp_combine_packets(body, (const cp_array)packets, num);
-
-    // release packets
-    if(num){
-        for(int i = 0; i < num; i++){
-            cp_packet_free(packets[i]);
-        }
-        free(packets);
-    }
+    rc = _cp_combine_packets(packets, body);
+    cp_array_free(packets, cp_packet_free);
     if(rc){
         return CP_ERROR;
     }
     return CP_OK;
 }
 
-int cp_parse_body(cp_client *client, const cp_buf *body, void(*callback)(const cp_buf *payload)){
-    cp_array packets;
-    size_t num;
-    int rc = _cp_split_packets(body, &packets, &num);
+int cp_parse_body(cp_client *client, const cp_buf *body, 
+    void(*callback)(const cp_buf *payload, void *p), void *p){
+    cp_array *packets;
+    int rc = _cp_split_packets(body, &packets);
     if(rc){
         return CP_ERROR;
     }
-    for(int i = 0; i < num; i++){
-        cp_packet *packet = packets[i];
-        rc = _cp_handle_packet(client, packet, callback);
+    for(int i = 0; i < packets->size; i++){
+        cp_packet *packet = packets->p[i];
+        rc = _cp_handle_packet(client, packet, callback, p);
         if(rc){
+            cp_array_free(packets, cp_packet_free);
             return CP_ERROR;
         }
     }
 
-    // release packets
-    for(int i = 0; i < num; i++){
-        cp_packet_free(packets[i]);
-    }
-    free(packets);
+    cp_array_free(packets, cp_packet_free);
     return CP_OK;
 }
 

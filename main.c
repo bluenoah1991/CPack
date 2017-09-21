@@ -55,7 +55,7 @@ void _http_post(const char *url, const cp_buf *post_data,
 
 // End HTTP
 
-void callback(const cp_buf *buf){
+void callback(const cp_buf *buf, void *p){
     char *ch;
     cp_buf_to_ch(buf, &ch);
     printf("resp: %s\r\n", ch);
@@ -64,7 +64,7 @@ void callback(const cp_buf *buf){
 
 void response_handler(const cp_buf *buf, void *p){
     cp_client *client = p;
-    cp_parse_body(client, buf, callback);
+    cp_parse_body(client, buf, callback, NULL);
 }
 
 int main(int argc, char **argv){

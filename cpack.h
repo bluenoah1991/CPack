@@ -27,6 +27,12 @@
 #define CP_OK               0   /* Successful result */
 #define CP_ERROR            1   /* Generic error */
 
+// Array
+typedef struct cp_array{
+    void **p;
+    size_t size;
+} cp_array;
+
 // STRUCT
 
 typedef struct cp_buf{
@@ -57,7 +63,7 @@ typedef struct cp_packet{
 
 // INTERFACE
 
-// BUFFER 
+// CP_BUF 
 
 void *cp_buf_init();
 
@@ -68,6 +74,14 @@ void *cp_buf_copy(const cp_buf *src_buf);
 void cp_buf_free(cp_buf *buffer);
 
 void cp_buf_to_ch(const cp_buf *buf, char **ch);
+
+// CP_ARRAY
+
+void *cp_array_init();
+
+void cp_array_push(cp_array *arr, void *p);
+
+void cp_array_free(cp_array *arr, void(*release)(void *p));
 
 // PACK & UNPACK
 
@@ -91,7 +105,7 @@ void *cp_encode_packet(
 
 void *cp_decode_packet(const cp_buf *buf, size_t offset);
 
-void cp_packet_free(cp_packet *packet);
+void cp_packet_free(void *p);
 
 // INTERFACE
 
@@ -103,7 +117,8 @@ void cp_client_free(cp_client *client);
 
 int cp_generate_body(cp_client *client, cp_buf **body);
 
-int cp_parse_body(cp_client *client, const cp_buf *body, void(*callback)(const cp_buf *payload));
+int cp_parse_body(cp_client *client, const cp_buf *body, 
+    void(*callback)(const cp_buf *payload, void *p), void *p);
 
 int cp_commit_packet(cp_client *client, const cp_buf *payload, uint8_t qos);
 
