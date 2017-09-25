@@ -72,13 +72,15 @@ void *cp_buf_init(){
 };
 
 void cp_buf_append(cp_buf *buf, const char *data, size_t size){
-    if(buf->size){
-        buf->data = realloc(buf->data, buf->size + size);
-    } else {
-        buf->data = malloc(size);
+    if(size){
+        if(buf->size){
+            buf->data = realloc(buf->data, buf->size + size);
+        } else {
+            buf->data = malloc(size);
+        }
+        memcpy(buf->data + buf->size, data, size);
+        buf->size += size;
     }
-    memcpy(buf->data + buf->size, data, size);
-    buf->size += size;
 }
 
 void *cp_buf_copy(const cp_buf *src_buf){
@@ -143,8 +145,8 @@ uint8_t read_byte(char **pptr){
 
 uint16_t read_short(char **pptr){
     char* ptr = *pptr;
-    int i = (uint16_t)(*ptr) << 8;
-    i += (uint16_t)(*(ptr+1));
+    uint16_t i = ((uint8_t)(*ptr)) << 8;
+    i += (uint8_t)(*(ptr+1));
     *pptr += 2;
     return i;
 }
@@ -644,7 +646,9 @@ int _cp_handle_packet(cp_client *client, const cp_packet *packet,
         if(rc){
             return CP_ERROR;
         }
-        callback(payload, p);
+        if(payload && payload->size){
+            callback(payload, p);
+        }
         cp_buf_free(payload);
         cp_packet *reply_packet = cp_encode_packet(
             CP_PROTOCOL_MSG_TYPE_COMPLETED, CP_PROTOCOL_QOS0, 0, packet->id, NULL);
