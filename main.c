@@ -91,7 +91,7 @@ int main(int argc, char **argv){
     cp_commit_packet(client, buf3, 2);
     cp_commit_packet(client, buf4, 2);
 
-    int t = 100;
+    int t = 20;
 
     while(--t){
         cp_sleep(500);
@@ -107,6 +107,6 @@ int main(int argc, char **argv){
         cp_buf_free(body);
     }
 
-    cp_client_free(client);
+    cp_client_free(&client);
 
 }

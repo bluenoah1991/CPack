@@ -113,7 +113,7 @@ void cp_sleep(int ms);
 
 int cp_client_init(cp_client **client, const char *dbpath);
 
-void cp_client_free(cp_client *client);
+void cp_client_free(cp_client **client);
 
 int cp_generate_body(cp_client *client, cp_buf **body);
 

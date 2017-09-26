@@ -785,13 +785,17 @@ int cp_client_init(cp_client **client, const char *dbpath){
     return CP_OK;
 }
 
-void cp_client_free(cp_client *client){
-    sqlite3_close(client->db);
-    heap_free(client->packets, _cp_packet_free);
-    free(client);
+void cp_client_free(cp_client **client){
+    sqlite3_close((*client)->db);
+    heap_free((*client)->packets, _cp_packet_free);
+    free(*client);
+    *client = NULL;
 }
 
 int cp_generate_body(cp_client *client, cp_buf **body){
+    if(client == NULL){
+        return CP_ERROR;
+    }
     cp_array *packets;
     int rc = _cp_unconfirmed_packet(client, &packets, 5);
     if(rc){
@@ -809,6 +813,9 @@ int cp_generate_body(cp_client *client, cp_buf **body){
 
 int cp_parse_body(cp_client *client, const cp_buf *body, 
     void(*callback)(const cp_buf *payload, void *p), void *p){
+    if(client == NULL){
+        return CP_ERROR;
+    }
     cp_array *packets;
     int rc = _cp_split_packets(body, &packets);
     if(rc){
@@ -828,6 +835,9 @@ int cp_parse_body(cp_client *client, const cp_buf *body,
 }
 
 int cp_commit_packet(cp_client *client, const cp_buf *payload, uint8_t qos){
+    if(client == NULL){
+        return CP_ERROR;
+    }
     uint16_t id;
     int rc = _cp_generate_id(client, &id);
     if(rc){
